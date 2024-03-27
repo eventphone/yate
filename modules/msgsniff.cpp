@@ -69,9 +69,8 @@ public:
 		    }
 		}
 	    }
-	    if (m_matchName && !m_matchName->runMatchString(list,params))
-		return false;
-	    return !m_matchParams || m_matchParams->runMatchListParam(list,params);
+	    return (!m_matchName || m_matchName->matchString(list,params))
+		&& (!m_matchParams || m_matchParams->matchListParam(list,params));
 	}
     virtual MatchingItemBase* copy() const {
 	    return new MatchingItemMessage(name(),m_matchName ? m_matchName->copy() : 0,
@@ -206,7 +205,7 @@ public:
     virtual void dispatched(const Message& msg, bool handled);
 };
 
-static bool s_active = true;
+static bool s_active = false;
 static bool s_timer = false;
 static const String s_command = "sniffer";
 static const String s_onOff[] = {"on", "off", ""};

@@ -40,8 +40,26 @@ static inline char* strAlloc(unsigned int n, char* old = 0)
 {
     char* data = (char*)::realloc(old,n + 1);
     if (!data)
-	Debug("String",DebugFail,"realloc(%u) returned NULL!",n + 1);
+	Debug("String",DebugFail,"realloc(%u) returned NULL",n + 1);
     return data;
+}
+
+// Allocate a new string if not already done
+// Used during replace/remove
+static inline bool strAllocChanged(char*& dest, char*& destPtr, const char* crt, const char* orig)
+{
+    if (dest)
+	return true;
+    dest = strAlloc(::strlen(orig));
+    if (!dest)
+	return false;
+    int len = (int)(crt - orig);
+    if (len)
+	::strncpy(dest,orig,len);
+    else
+	*dest = 0;
+    destPtr = dest + len;
+    return true;
 }
 
 // String to regular integer conversion, takes into account overflows
@@ -829,6 +847,18 @@ int64_t String::toInt64(int64_t defvalue, int base, int64_t minvalue, int64_t ma
     return defvalue;
 }
 
+int64_t String::toInt64Dict(const TokenDict64* tokens, int64_t defvalue, int base) const
+{
+    if (!m_string)
+	return defvalue;
+    if (tokens) {
+	for (; tokens->token; tokens++)
+	    if (operator==(tokens->token))
+		return tokens->value;
+    }
+    return toInt64(defvalue,base);
+}
+
 uint64_t String::toUInt64(uint64_t defvalue, int base, uint64_t minvalue, uint64_t maxvalue,
     bool clamp) const
 {
@@ -1532,6 +1562,20 @@ bool String::endsWith(const char* what, bool wordBreak, bool caseInsensitive) co
     return (::strncmp(m_string+m_length-l,what,l) == 0);
 }
 
+String& String::replaceChars(const char* what, const char* repl, bool inPlace,
+    int wLen, int rLen, bool* chg)
+{
+    char* s = c_replace_chars(m_string,what,repl,inPlace,wLen,rLen,chg);
+    if (s == m_string)
+	return *this;
+    unsigned int len = s ? ::strlen(s) : 0;
+    if (!len && s) {
+	::free(s);
+	s = 0;
+    }
+    return changeStringData(s,len);
+}
+
 String& String::extractTo(const char* sep, String& str)
 {
     int pos = find(sep);
@@ -1648,39 +1692,39 @@ void String::clearMatches()
 	m_matches->clear();
 }
 
-ObjList* String::split(char separator, bool emptyOK) const
+ObjList* String::split(ObjList& list, char separator, bool emptyOK) const
 {
-    ObjList* list = new ObjList;
-    ObjList* dest = list;
+    ObjList* ret = 0;
+    ObjList* dest = &list;
     int p = 0;
     int s;
     while ((s = find(separator,p)) >= 0) {
 	if (emptyOK || (s > p))
-	    dest = dest->append(new String(m_string+p,s-p));
+	    ret = dest = dest->append(new String(m_string+p,s-p));
 	p = s + 1;
     }
     if (emptyOK || (m_string && m_string[p]))
-	dest->append(new String(m_string+p));
-    return list;
+	return dest->append(new String(m_string+p));
+    return ret;
 }
 
-ObjList* String::split(const Regexp& reg, bool emptyOK) const
+ObjList* String::split(ObjList& list, const Regexp& reg, bool emptyOK) const
 {
     String s = *this;
-    ObjList* list = new ObjList;
-    ObjList* dest = list;
+    ObjList* ret = 0;
+    ObjList* dest = &list;
     while (true) {
 	if (!(s && s.matches(reg))) {
 	    if (s || emptyOK)
-		dest = dest->append(new String(s));
+		return dest->append(new String(s));
 	    break;
 	}
 	int pos = s.matchOffset(0);
 	if (emptyOK || pos > 0)
-	    dest = dest->append(new String(s.c_str(),pos));
+	    ret = dest = dest->append(new String(s.c_str(),pos));
 	s = s.substr(pos + s.matchLength(0));
     }
-    return list;
+    return ret;
 }
 
 String String::msgEscape(const char* str, char extraEsc)
@@ -2202,6 +2246,76 @@ unsigned int String::c_skip_chars(const char*& str, const char* what, int len, b
 	while (len-- && *str && *str != *what)
 	    str++;
     return (unsigned int)(str - orig);
+}
+
+char* String::c_replace_chars(const char* str, const char* what, const char* repl,
+    bool inPlace, int wLen, int rLen, bool* chg)
+{
+    if (TelEngine::null(str) || TelEngine::null(what))
+	return (char*)str;
+    if (wLen < 0)
+	wLen = ::strlen(what);
+    if (!wLen)
+	return (char*)str;
+    if (TelEngine::null(repl))
+	rLen = 0;
+    else if (rLen < 0)
+	rLen = ::strlen(repl);
+
+    if (inPlace && wLen == rLen) {
+	for (char* b = (char*)str; *b; ++b) {
+	    const char* tmp = ::strchr(what,*b);
+	    if (!tmp)
+		continue;
+	    *b = repl[tmp - what];
+	    if (chg)
+		*chg = true;
+	}
+	return (char*)str;
+    }
+
+    char* newStr = 0;
+    char* ptr = 0;
+    if (rLen) {
+	// Replace or remove
+	for (const char* b = str; *b; ++b) {
+	    const char* tmp = ::strchr(what,*b);
+	    if (!tmp) {
+		// Not matched. Add it to destination if already allocated
+		if (ptr)
+		    *ptr++ = *b;
+	    }
+	    else if (strAllocChanged(newStr,ptr,b,str)) {
+		int i = (int)(tmp - what);
+		if (i < rLen)
+		    *ptr++ = repl[i];
+	    }
+	    else
+		return 0;
+	}
+    }
+    else {
+	// Remove only
+	for (const char* b = str; *b; ++b) {
+	    if (!::strchr(what,*b)) {
+		// Not matched. Add it to destination if already allocated
+		if (ptr)
+		    *ptr++ = *b;
+	    }
+	    else if (!strAllocChanged(newStr,ptr,b,str))
+		return 0;
+	}
+    }
+    if (!newStr)
+	return (char*)str;
+    if (chg)
+	*chg = true;
+    if (*newStr) {
+	*ptr = 0;
+	return newStr;
+    }
+    ::free(newStr);
+    return 0;
 }
 
 

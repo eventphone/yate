@@ -236,6 +236,21 @@ namespace TelEngine {
 
 #define YSTRING_INIT_HASH ((unsigned) -1)
 
+class Lockable;
+class Semaphore;
+class Mutex;
+class RWLock;
+class WLock;
+class RLock;
+class RWLockPrivate;
+class String;
+class DataBlock;
+class ObjList;
+class NamedCounter;
+class MutexPrivate;
+class SemaphorePrivate;
+class ThreadPrivate;
+
 /**
  * Abort execution (and coredump if allowed) if the abort flag is set.
  * This function may not return.
@@ -841,6 +856,18 @@ public:
      */
     static void relayOutput(int level, char* buffer, const char* component = 0, const char* info = 0);
 
+    /**
+     * Set Output function display timestamp
+     * @param on True to enable, false to disable
+     */
+    static void outputTimestamp(bool on);
+
+    /**
+     * Check if Output function displays timestamp
+     * @return True if Output function displays timestamp, false if not
+     */
+    static bool outputTimestamp();
+
 private:
     const char* m_name;
     int m_level;
@@ -878,15 +905,6 @@ struct TokenDict64 {
      */
     int64_t value;
 };
-
-class String;
-class DataBlock;
-class Mutex;
-class RWLock;
-class WLock;
-class RLock;
-class ObjList;
-class NamedCounter;
 
 #if 0 /* for documentation generator */
 /**
@@ -1103,6 +1121,42 @@ YATE_API inline uint32_t hashPtr(const void* ptr)
 #else
     return hashInt32((uintptr_t)ptr);
 #endif
+}
+
+/**
+ * Sort a vector
+ * Held object MUST implement the assignment operator
+ * @param buf Pointer to buffer
+ * @param len Buffer length
+ * @param callbackCompare Pointer to a callback function that should compare two objects
+ * <pre>
+ *     obj1 First object of the comparation
+ *     obj2 Second object of the comparation
+ *     context Context data
+ *     return 0 if the objects are equal; positive value if obj2 > obj1; negative value if obj1 > obj2
+ *     The callback may return the opposite value if sorting in descending order
+ *     Note: the function should expect receiving null pointers if sorting array of pointers
+ * </pre>
+ * @param context Context data to be passed to callback
+ */
+template <class Obj> void yateSort(Obj* buf, unsigned int len,
+    int (*callbackCompare)(Obj& obj1, Obj& obj2, void* context),
+    void* context = 0)
+{
+    if (!buf)
+	return;
+    while (len > 1) {
+	unsigned int n = len;
+	len = 0;
+        for (unsigned int i = 1; i < n; ++i) {
+	    if (callbackCompare(buf[i - 1],buf[i],context) <= 0)
+		continue;
+	    Obj tmp = buf[i - 1];
+	    buf[i - 1] = buf[i];
+	    buf[i] = tmp;
+	    len = i;
+	}
+    }
 }
 
 
@@ -2066,11 +2120,14 @@ public:
 	{ return at(index); }
 
     /**
-     * Array-like indexing operator
+     * Find an object by name
      * @param str String value of the object to locate
      * @return Pointer to the object or NULL
      */
-    GenObject* operator[](const String& str) const;
+    inline GenObject* operator[](const String& str) const {
+	    ObjList* o = find(str);
+	    return o ? o->get() : 0;
+	}
 
     /**
      * Get the item in the list that holds an object
@@ -2078,6 +2135,16 @@ public:
      * @return Pointer to the found item or NULL
      */
     ObjList* find(const GenObject* obj) const;
+
+    /**
+     * Find an object by pointer
+     * @param obj Pointer to the object to search for
+     * @return Pointer to the object or NULL
+     */
+    inline GenObject* findObj(const GenObject* obj) const {
+	    ObjList* o = find(obj);
+	    return o ? o->get() : 0;
+	}
 
     /**
      * Get the item in the list that holds an object by String value
@@ -2170,6 +2237,126 @@ public:
      */
     inline void setDelete(bool autodelete)
 	{ m_delete = autodelete; }
+
+    /**
+     * Get the item in the list that holds an object
+     * @param lock Lockable to protect the operation. A RWLock will be read locked
+     * @param obj Pointer to the object to search for
+     * @param ref True to reference a found RefObject. the method will return NULL
+     *  if a found object is not a RefObject one
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return Pointer to the found item or NULL
+     */
+    GenObject* find(Lockable& lock, const GenObject* obj, bool ref = false, long maxwait = -1) const;
+
+    /**
+     * Get the item in the list that holds an object by String value
+     * @param lock Lockable to protect the operation. A RWLock will be read locked
+     * @param str String value (toString) of the object to search for
+     * @param ref True to reference a found RefObject. the method will return NULL
+     *  if a found object is not a RefObject one
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return Pointer to the found item or NULL
+     */
+    GenObject* find(Lockable& lock, const String& str, bool ref = false, long maxwait = -1) const;
+
+    /**
+     * Insert an object at this point
+     * @param lock Lockable to protect the operation. A RWLock will be write locked
+     * @param obj Pointer to the object to set
+     * @param autoDelete Object autoDelete flag
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @param compact True to replace NULL values in list if possible
+     * @return A pointer to the inserted list item
+     */
+    ObjList* insert(Lockable& lock, const GenObject* obj, bool autoDelete = true,
+	long maxwait = -1, bool compact = true);
+
+    /**
+     * Append an object to the end of the list
+     * @param lock Lockable to protect the operation. A RWLock will be write locked
+     * @param obj Pointer to the object to set
+     * @param autoDelete Object autoDelete flag
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @param compact True to replace NULL values in list if possible
+     * @return A pointer to the inserted list item
+     */
+    ObjList* append(Lockable& lock, const GenObject* obj, bool autoDelete = true,
+	long maxwait = -1, bool compact = true);
+
+    /**
+     * Set unique entry in this list. If not found, append it to the list
+     * @param lock Lockable to protect the operation. A RWLock will be write locked
+     * @param obj Pointer to the object to set
+     * @param autoDelete Object autoDelete flag
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @param compact True to replace NULL values in list if possible
+     * @return A pointer to the set list item
+     */
+    ObjList* setUnique(Lockable& lock, const GenObject* obj, bool autoDelete = true,
+	long maxwait = -1, bool compact = true);
+
+    /**
+     * Delete this list item
+     * @param lock Optional Lockable to protect the operation. A RWLock will be write locked
+     * @param delobj True to delete the object (default)
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return Pointer to the object if not destroyed
+     */
+    GenObject* remove(Lockable& lock, bool delobj = true, long maxwait = -1);
+
+    /**
+     * Delete the list item that holds a given object
+     * @param lock Optional Lockable to protect the operation. A RWLock will be write locked
+     * @param obj Object to search in the list
+     * @param delobj True to delete the object (default)
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return Pointer to the object if not destroyed
+     */
+    GenObject* remove(Lockable& lock, GenObject* obj, bool delobj = true, long maxwait = -1);
+
+    /**
+     * Delete the first list item that holds an object with a iven value
+     * @param lock Optional Lockable to protect the operation. A RWLock will be write locked
+     * @param str String value (toString) of the object to remove
+     * @param delobj True to delete the object (default)
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return Pointer to the object if not destroyed
+     */
+    GenObject* remove(Lockable& lock, const String& str, bool delobj = true, long maxwait = -1);
+
+    /**
+     * Safely clear the list and optionally delete all contained objects
+     * @param lock Optional Lockable to protect the operation. A RWLock will be write locked
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     */
+    void clear(Lockable& lock, long maxwait = -1);
+
+    /**
+     * Safely remove all empty objects in the list
+     * @param lock Optional Lockable to protect the operation. A RWLock will be write locked
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     */
+    void compact(Lockable& lock, long maxwait = -1);
+
+    /**
+     * Move or copy this list into another one
+     * autoDelete() is set in destination as found for each item in list
+     * @param dest Destination list. Create a new one if not given
+     * @param lock Optional Lockable to protect the operation. A RWLock will be write locked
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return ObjList pointer ('dest' if given). The caller is owning the new list
+     */
+    ObjList* move(ObjList* dest, Lockable* lock = 0, long maxwait = -1);
+
+    /**
+     * Reference all items in this into another one
+     * @param dest Destination list. Create a new one if not given
+     * @param lock Optional Lockable to protect the operation. A RWLock will be read locked
+     * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+     * @return ObjList pointer ('dest' if given). The caller is owning the new list
+     */
+    ObjList* copy(ObjList* dest, Lockable* lock = 0, long maxwait = -1) const;
 
     /**
      * A static empty object list
@@ -2299,6 +2486,13 @@ public:
      * @return Capacity of the vector
      */
     unsigned int resize(unsigned int len, bool keepData = false);
+
+    /**
+     * Compact vector, move non NULL pointers in front
+     * @param resizeToCount Resize to non null items count, clears the list if empty
+     * @return The number of non NULL pointers
+     */
+    unsigned int compact(bool resizeToCount = false);
 
     /**
      * Retrieve and remove an object from the vector
@@ -2987,6 +3181,15 @@ public:
 	int64_t maxvalue = LLONG_MAX, bool clamp = true) const;
 
     /**
+     * Convert the string to an 64bit integer value looking up first a token table.
+     * @param tokens Pointer to an array of tokens to lookup first
+     * @param defvalue Default to return if the string is not a token or number
+     * @param base Numeration base, 0 to autodetect
+     * @return The integer interpretation or defvalue.
+     */
+    int64_t toInt64Dict(const TokenDict64* tokens, int64_t defvalue = 0, int base = 0) const;
+
+    /**
      * Convert the string to an unsigned 64 bit integer value.
      * @param defvalue Default to return if the string is not a number
      * @param base Numeration base, 0 to autodetect
@@ -3484,6 +3687,35 @@ public:
     bool startSkip(const char* what, bool wordBreak = true, bool caseInsensitive = false);
 
     /**
+     * Replace and/or remove chars in string
+     * Replace and remove may be done in the same function call by giving a shorter 'repl':
+     * s="a-(bc)"; s.replaceChars("-()","_") will result in 'a_bc'
+     * @param what Characters to search for
+     * @param repl Characters to replace with. Found characters are removed if there is no replacement
+     * @param inPlace In place replace. This parameter is ignored if search and replace
+     *  strings have different length
+     * @param wLen Length of characters to search string, negative to detect.
+     *  No replace is done if this parameter is 0
+     * @param rLen Length of characters to replace with string, negative to detect.
+     *  Found characters will be removed if this parameter is 0
+     * @param chg Optional pointer to flag to be set if changes are done (not set if no changes)
+     * @return Reference to this string
+     */
+    String& replaceChars(const char* what, const char* repl, bool inPlace = false,
+	int wLen = -1, int rLen = -1, bool* chg = 0);
+
+    /**
+     * Remove chars in string
+     * @param what Characters to remove
+     * @param wLen Length of characters to search string, negative to detect.
+     *  No remove is done if this parameter is 0
+     * @param chg Optional pointer to flag to be set if changes are done (not set if no changes)
+     * @return Reference to this string
+     */
+    inline String& removeChars(const char* what, int wLen = -1, bool* chg = 0)
+	{ return replaceChars(what,0,false,wLen,-1,chg); }
+
+    /**
      * Extract a substring up to a separator
      * @param sep Separator string to match after extracted fragment
      * @param store Reference to String variable to store extracted fragment
@@ -3578,11 +3810,33 @@ public:
 
     /**
      * Splits the string at a delimiter character
+     * @param list Destination list
+     * @param separator Character where to split the string
+     * @param emptyOK True if empty strings should be inserted in list
+     * @return Pointer to last added item, NULL if no item was added
+     */
+    ObjList* split(ObjList& list, char separator, bool emptyOK = true) const;
+
+    /**
+     * Splits the string at Regexp delimiter
+     * @param list Destination list
+     * @param reg Regexp describing the delimiter
+     * @param emptyOK True if empty strings should be inserted in list
+     * @return Pointer to last added item, NULL if no item was added
+     */
+    ObjList* split(ObjList& list, const Regexp& reg, bool emptyOK = true) const;
+
+    /**
+     * Splits the string at a delimiter character
      * @param separator Character where to split the string
      * @param emptyOK True if empty strings should be inserted in list
      * @return A newly allocated list of strings, must be deleted after use
      */
-    ObjList* split(char separator, bool emptyOK = true) const;
+    inline ObjList* split(char separator, bool emptyOK = true) const {
+	    ObjList* lst = new ObjList;
+	    split(*lst,separator,emptyOK);
+	    return lst;
+	}
 
     /**
      * Splits the string at Regexp delimiter
@@ -3590,7 +3844,11 @@ public:
      * @param emptyOK True if empty strings should be inserted in list
      * @return A newly allocated list of strings, must be deleted after use
      */
-    ObjList* split(const Regexp& reg, bool emptyOK = true) const;
+    inline ObjList* split(const Regexp& reg, bool emptyOK = true) const {
+	    ObjList* lst = new ObjList;
+	    split(*lst,reg,emptyOK);
+	    return lst;
+	}
 
     /**
      * Create an escaped string suitable for use in messages
@@ -3817,6 +4075,27 @@ public:
      */
     static unsigned int c_skip_chars(const char*& str, const char* what,
 	int len = -1, bool skipFound = true);
+
+    /**
+     * Replace and/or remove chars in a string
+     * Replace and remove may be done in the same function call by giving a shorter 'repl':
+     * c_replace_chars("a-(bc)","-()","_") will return 'a_bc'
+     * @param str String to replace in
+     * @param what Characters to search for
+     * @param repl Characters to replace with. Found characters are removed if there is no replacement
+     * @param inPlace In place replace. This parameter is ignored if search and replace
+     *  strings have different length
+     * @param wLen Length of characters to search string, negative to detect.
+     *  No replace is done if this parameter is 0
+     * @param rLen Length of characters to replace with string, negative to detect.
+     *  Found characters will be removed if this parameter is 0
+     * @param chg Optional pointer to flag to be set if changes are done (not set if no changes)
+     * @return String with chars replaced/removed.
+     *   May be different from the given string if changed. The caller is owning the new string
+     *   May return NULL if string is empty after replace or memory allocation failure
+     */
+    static char* c_replace_chars(const char* str, const char* what, const char* repl = 0,
+	bool inPlace = false, int wLen = -1, int rLen = -1, bool* chg = 0);
 
 protected:
     /**
@@ -4095,6 +4374,37 @@ public:
 	}
 
     /**
+     * Retrieve index of object by value
+     * Obj MUST implement the == operator
+     * @param val Object value
+     * @param offs Optional index to start
+     * @param found Optional pointer to be filled with found object pointer
+     * @return Index of object, -1 if not found
+     */
+    inline int indexOfValue(const Obj& val, unsigned int offs = 0, Obj** found = 0) const {
+	    for (const Obj* d = data(offs); offs < length(); ++offs, ++d)
+		if (val == *d) {
+		    if (found)
+			*found = (Obj*)d;
+		    return offs;
+		}
+	    return -1;
+	}
+
+    /**
+     * Find an object by name
+     * Obj MUST implement the == operator
+     * @param val Object value
+     * @param offs Optional index to start
+     * @return Obj pointer, NULL if not found
+     */
+    inline Obj* findValue(const Obj& val, unsigned int offs = 0) const {
+	    Obj* d = 0;
+	    indexOfValue(val,offs,&d);
+	    return d;
+	}
+
+    /**
      * Clear data
      */
     inline void clear() {
@@ -4198,7 +4508,7 @@ public:
      * @param count Number of items to fill, negative to fill until vector end
      * @return Number of filled items. 0 on empty count or failure
      */
-    inline unsigned int fill(const Obj& value, unsigned int offs = 0, int count = -1)
+    inline unsigned int fillObj(const Obj& value, unsigned int offs = 0, int count = -1)
 	{ return fill(offs,count,&value); }
 
     /**
@@ -4208,7 +4518,7 @@ public:
      * @param offs Optional start offset
      * @return Number of filled items, 0 on empty items or failure
      */
-    inline unsigned int fill(const Obj* items, unsigned int count, unsigned int offs = 0) {
+    inline unsigned int fillObj(const Obj* items, unsigned int count, unsigned int offs = 0) {
 	    if (!(items && count))
 		return 0;
 	    unsigned int n = numItems(offs,count);
@@ -4318,7 +4628,7 @@ public:
 	    else {
 		unsigned int n = length();
 		resize(2 * n);
-		fill(data(),n,n);
+		fillObj(data(),n,n);
 	    }
 	    return *this;
 	}
@@ -5440,13 +5750,13 @@ public:
     u_int32_t next();
 
     /**
-     * Thread safe (and shared) replacement for library ::random()
+     * Thread safe (and shared) replacement for library random()
      * @return Next random number in the global sequence
      */
     static long int random();
 
     /**
-     * Thread safe (and shared) replacement for library ::srandom()
+     * Thread safe (and shared) replacement for library srandom()
      * @param seed Number to set as seed in the global sequence
      */
     static void srandom(unsigned int seed);
@@ -6465,6 +6775,19 @@ class YATE_API NamedList : public String
     friend class NamedIterator;
 public:
     /**
+     * List dump flags
+     */
+    enum DumpFlags {
+	DumpAddSeparator = 0x0001,       // Add separator before dumped list data
+	DumpForcePrefix = 0x0001,        // Force given prefix even if dumped data is empty
+	DumpName = 0x0002,               // Dump list name
+	DumpQuoteName = 0x0004,          // Quote list name
+	DumpEmptyName = 0x0008,          // Dump empty list name
+	DumpQuoteParamName = 0x0010,     // Quote parameter name
+	DumpDontQuoteParamValue = 0x0020,// Do not quote parameter value
+    };
+
+    /**
      * Creates a new named list.
      * @param name Name of the list - must not be NULL or empty
      */
@@ -6903,6 +7226,15 @@ public:
 	int64_t maxvalue = LLONG_MAX, bool clamp = true) const;
 
     /**
+     * Retrieve the 64bit numeric value of a parameter trying first a table lookup.
+     * @param name Name of parameter to locate
+     * @param tokens A pointer to an array of tokens to try to lookup
+     * @param defvalue Default value to return if not found
+     * @return The number contained in the named parameter or the default
+     */
+    int64_t getInt64ValueDict(const String& name, const TokenDict64* tokens, int64_t defvalue = 0) const;
+
+    /**
      * Retrieve the unsigned 64-bit numeric value of a parameter.
      * @param name Name of parameter to locate
      * @param defvalue Default value to return if not found
@@ -6949,6 +7281,19 @@ public:
      * @param force True to insert the separator even in an empty string
      */
     void dump(String& str, const char* separator, char quote = 0, bool force = false) const;
+
+    /**
+     * List dump
+     * @param str String to which the name and parameters are appended
+     * @param flags Dump flags
+     * @param separator Separator string to use before each parameter
+     * @param nameSep Name/value separator, use "=" if NULL
+     * @param prefix String to be added to destination before dumped data
+     * @param quote String quoting character, usually single or double quote
+     * @return True if destination string changed, false otherwise
+     */
+    bool dump(String& str, unsigned int flags, const char* separator,
+	const char* nameSep = 0, const char* prefix = 0, char quote = 0) const;
 
     /**
      * A static empty named list
@@ -7146,6 +7491,12 @@ public:
     inline const String& getExtra() const
 	{ parse(); return m_extra; }
 
+    /**
+     * Initialize the URI global options
+     * @param params Parameters list
+     */
+    static void setup(const NamedList& params);
+
 protected:
     /**
      * Notification method called whenever the string URI has changed.
@@ -7153,6 +7504,12 @@ protected:
      *  method inherited from @ref String.
      */
     virtual void changed();
+
+    /**
+     * Clear held data
+     */
+    virtual void clearData() const;
+
     mutable bool m_parsed;
     mutable String m_desc;
     mutable String m_proto;
@@ -7848,11 +8205,6 @@ private:
     String m_type;
 };
 
-class MutexPrivate;
-class SemaphorePrivate;
-class ThreadPrivate;
-class RWLockPrivate;
-
 /**
  * An abstract base class for implementing lockable objects
  * @short Abstract interface for lockable objects
@@ -7899,6 +8251,27 @@ public:
      * @return True if the object was fully unlocked
      */
     virtual bool unlockAll();
+
+    /**
+     * Retrieve a Mutex from this object
+     * @return Mutex pointer, NULL if this is not a Mutex
+     */
+    virtual Mutex* lockableMutex()
+	{ return 0; }
+
+    /**
+     * Retrieve a Semaphore from this object
+     * @return Semaphore pointer, NULL if this is not a Semaphore
+     */
+    virtual Semaphore* lockableSemaphore()
+	{ return 0; }
+
+    /**
+     * Retrieve a RWLock from this object
+     * @return RWLock pointer, NULL if this is not a RWLock
+     */
+    virtual RWLock* lockableRWLock()
+	{ return 0; }
 
     /**
      * Set a maximum wait time for debugging purposes
@@ -8000,6 +8373,13 @@ public:
      * @return True if this is a recursive mutex, false for a fast mutex
      */
     bool recursive() const;
+
+    /**
+     * Retrieve a Mutex from this object
+     * @return Mutex pointer
+     */
+    virtual Mutex* lockableMutex()
+	{ return this; }
 
     /**
      * Get the number of mutexes counting the shared ones only once
@@ -8139,6 +8519,13 @@ public:
     virtual bool locked() const;
 
     /**
+     * Retrieve a Semaphore from this object
+     * @return Semaphore pointer
+     */
+    virtual Semaphore* lockableSemaphore()
+	{ return this; }
+
+    /**
      * Get the number of semaphores counting the shared ones only once
      * @return Count of individual semaphores
      */
@@ -8159,79 +8546,6 @@ public:
 private:
     SemaphorePrivate* privDataCopy() const;
     SemaphorePrivate* m_private;
-};
-
-/**
- * A lock is a stack allocated (automatic) object that locks a lockable object
- *  on creation and unlocks it on destruction - typically when exiting a block
- * @short Ephemeral mutex or semaphore locking object
- */
-class YATE_API Lock
-{
-    YNOCOPY(Lock); // no automatic copies please
-public:
-    /**
-     * Create the lock, try to lock the object
-     * @param lck Reference to the object to lock
-     * @param maxwait Time in microseconds to wait, -1 wait forever
-     */
-    inline Lock(Lockable& lck, long maxwait = -1)
-	{ m_lock = lck.lock(maxwait) ? &lck : 0; }
-
-    /**
-     * Create the lock, try to lock the object
-     * @param lck Pointer to the object to lock
-     * @param maxwait Time in microseconds to wait, -1 wait forever
-     */
-    inline Lock(Lockable* lck, long maxwait = -1)
-	{ m_lock = (lck && lck->lock(maxwait)) ? lck : 0; }
-
-    /**
-     * Destroy the lock, unlock the mutex if it was locked
-     */
-    inline ~Lock()
-	{ if (m_lock) m_lock->unlock(); }
-
-    /**
-     * Return a pointer to the lockable object this lock holds
-     * @return A pointer to a Lockable or NULL if locking failed
-     */
-    inline Lockable* locked() const
-	{ return m_lock; }
-
-    /**
-     * Unlock the object if it was locked and drop the reference to it
-     */
-    inline void drop()
-	{ if (m_lock) m_lock->unlock(); m_lock = 0; }
-
-    /**
-     * Attempt to acquire a new lock on another object
-     * @param lck Pointer to the object to lock
-     * @param maxwait Time in microseconds to wait, -1 wait forever
-     * @return True if locking succeeded or same object was locked
-     */
-    inline bool acquire(Lockable* lck, long maxwait = -1)
-	{ return (lck && (lck == m_lock)) ||
-	    (drop(),(lck && (m_lock = lck->lock(maxwait) ? lck : 0))); }
-
-    /**
-     * Attempt to acquire a new lock on another object
-     * @param lck Reference to the object to lock
-     * @param maxwait Time in microseconds to wait, -1 wait forever
-     * @return True if locking succeeded or same object was locked
-     */
-    inline bool acquire(Lockable& lck, long maxwait = -1)
-	{ return acquire(&lck,maxwait); }
-
-private:
-    Lockable* m_lock;
-
-    /** Make sure no Lock is ever created on heap */
-    inline void* operator new(size_t);
-
-    /** Never allocate an array of this class */
-    inline void* operator new[](size_t);
 };
 
 /**
@@ -8341,7 +8655,7 @@ public:
      * Unlock either the read or write lock held by the calling thread
      * @return True if anything was unlocked
      */
-    bool unlock();
+    virtual bool unlock();
 
     /**
      * Lock the read lock.
@@ -8373,6 +8687,13 @@ public:
     virtual bool locked() const;
 
     /**
+     * Retrieve a RWLock from this object
+     * @return RWLock pointer
+     */
+    virtual RWLock* lockableRWLock()
+	{ return this; }
+
+    /**
      * Debugging method for disabling RW locks usage
      * and replacing it with a non-recursive mutex
      * @param disable True to disable RW locks usage
@@ -8388,7 +8709,7 @@ private:
  * Ephemeral read lock on a read-write lock (stack allocated lock that is locked on
  * creation and unlocked in destructor
  */
-class RLock
+class YATE_API RLock
 {
 public:
     /**
@@ -8459,7 +8780,7 @@ private:
  * Ephemeral read lock on a read-write lock (stack allocated lock that is locked on
  * creation and unlocked in destructor
  */
-class WLock
+class YATE_API WLock
 {
 public:
     /**
@@ -8583,6 +8904,177 @@ private:
     RWLock** m_data;                     // The array
     unsigned int m_length;               // Array length
 };
+
+/**
+ * A lock is a stack allocated (automatic) object that locks a lockable object
+ *  on creation and unlocks it on destruction - typically when exiting a block
+ * @short Ephemeral mutex, semaphore or rw-lock locking object
+ */
+class YATE_API Lock
+{
+    YNOCOPY(Lock); // no automatic copies please
+public:
+    /**
+     * Create the lock, try to lock the object
+     * @param lck Reference to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     * @param readLock Read lock a RWLock
+     */
+    inline Lock(Lockable& lck, long maxwait = -1, bool readLock = false)
+	: m_lock(0)
+	{ acquire(lck,maxwait,readLock); }
+
+    /**
+     * Create the lock, try to lock the object
+     * @param lck Pointer to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     * @param readLock Read lock a RWLock
+     */
+    inline Lock(Lockable* lck, long maxwait = -1, bool readLock = false)
+	: m_lock(0)
+	{ acquire(lck,maxwait,readLock); }
+
+    /**
+     * Destroy the lock, unlock the mutex if it was locked
+     */
+    inline ~Lock()
+	{ drop(); }
+
+    /**
+     * Return a pointer to the lockable object this lock holds
+     * @return A pointer to a Lockable or NULL if locking failed
+     */
+    inline Lockable* locked() const
+	{ return m_lock; }
+
+    /**
+     * Unlock the object if it was locked and drop the reference to it
+     */
+    inline void drop()
+	{ if (m_lock) m_lock->unlock(); m_lock = 0; }
+
+    /**
+     * Attempt to acquire a new lock on another object
+     * @param lck Pointer to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     * @param readLock Read lock a RWLock
+     * @return True if locking succeeded or same object was locked
+     */
+    inline bool acquire(Lockable* lck, long maxwait = -1, bool readLock = false) {
+	    if (lck != m_lock) {
+		drop();
+		if (lck) {
+		    RWLock* rd = readLock ? lck->lockableRWLock() : 0;
+		    m_lock = (rd ? rd->readLock(maxwait) : lck->lock(maxwait)) ? lck : 0;
+		}
+	    }
+	    return 0 != locked();
+	}
+
+    /**
+     * Attempt to acquire a new lock on another object
+     * @param lck Reference to the object to lock
+     * @param maxwait Time in microseconds to wait, -1 wait forever
+     * @param readLock Read lock a RWLock
+     * @return True if locking succeeded or same object was locked
+     */
+    inline bool acquire(Lockable& lck, long maxwait = -1, bool readLock = false)
+	{ return acquire(&lck,maxwait,readLock); }
+
+private:
+    Lockable* m_lock;
+
+    /** Make sure no Lock is ever created on heap */
+    inline void* operator new(size_t);
+
+    /** Never allocate an array of this class */
+    inline void* operator new[](size_t);
+};
+
+/**
+ * Helper template used to safely reference an object
+ * @param dest Destination
+ * @param obj Pointer to object to reference
+ * @param lock Lockable to protect the operation. A RWLock will be read locked
+ * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+ * @return Obj pointer on success, NULL on failure
+ */
+template <class Obj> Obj* ref(RefPointer<Obj>& dest, Obj* obj, Lockable& lock, long maxwait = -1)
+{
+    Lock lck(lock,maxwait,true);
+    dest = obj;
+    return dest;
+}
+
+/**
+ * Helper template used to safely find and reference an object
+ * @param dest Destination
+ * @param list List to search in
+ * @param name Object name to search
+ * @param lock Lockable to protect the operation. A RWLock will be read locked
+ * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+ * @return Obj pointer on success, NULL on failure
+ */
+template <class Obj> Obj* find(RefPointer<Obj>& dest, const ObjList& list,
+    const String& name, Lockable& lock, long maxwait = -1)
+{
+    Lock lck(lock,maxwait,true);
+    dest = static_cast<Obj*>(list[name]);
+    return dest;
+}
+
+/**
+ * Helper template used to safely find and reference an object
+ * @param dest Destination
+ * @param list List to search in
+ * @param gen Object to search
+ * @param lock Lockable to protect the operation. A RWLock will be read locked
+ * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+ * @return Obj pointer on success, NULL on failure
+ */
+template <class Obj> Obj* find(RefPointer<Obj>& dest, const ObjList& list,
+    const GenObject* gen, Lockable& lock, long maxwait = -1)
+{
+    Lock lck(lock,maxwait,true);
+    dest = static_cast<Obj*>(list.findObj(gen));
+    return dest;
+}
+
+/**
+ * Helper template used to safely find and reference an object with virtual
+ *  inheritance (cast not possible, use getObject())
+ * @param dest Destination
+ * @param list List to search in
+ * @param name Object name to search
+ * @param lock Lockable to protect the operation. A RWLock will be read locked
+ * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+ * @return Obj pointer on success, NULL on failure
+ */
+template <class Obj> Obj* findObj(RefPointer<Obj>& dest, const ObjList& list,
+    const String& name, Lockable& lock, long maxwait = -1)
+{
+    Lock lck(lock,maxwait,true);
+    dest = YOBJECT(Obj,list[name]);
+    return dest;
+}
+
+/**
+ * Helper template used to safely find and reference an object with virtual
+ *  inheritance (cast not possible, use getObject())
+ * @param dest Destination
+ * @param list List to search in
+ * @param gen Object to search
+ * @param lock Lockable to protect the operation. A RWLock will be read locked
+ * @param maxwait Time in microseconds to wait for locking, -1 wait forever
+ * @return Obj pointer on success, NULL on failure
+ */
+template <class Obj> Obj* findObj(RefPointer<Obj>& dest, const ObjList& list,
+    const GenObject* gen, Lockable& lock, long maxwait = -1)
+{
+    Lock lck(lock,maxwait,true);
+    dest = YOBJECT(Obj,list.findObj(gen));
+    return dest;
+}
 
 /**
  * This class holds the action to execute a certain task, usually in a
