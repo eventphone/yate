@@ -488,14 +488,12 @@ void ForkMaster::lostSlave(ForkSlave* slave, const char* reason)
 {
     Lock lock(CallEndpoint::commonMutex());
     bool ringing = clearRinging(slave->id());
-#ifdef XDEBUG
-    GenObject* gen = 
-#endif
+    GenObject* gen =
     m_slaves.remove(slave,false);
-#ifdef XDEBUG
-    XDebug(this,gen ? DebugInfo : DebugMild,"Removed%s slave (%p) '%s' refs=%u [%p]",
-	(gen ? "":" MISSING"),slave,slave->id().c_str(),slave->refcount(),this);
-#endif
+    if (!gen) {
+        Debug(this,DebugWarn,"Attempted to remove MISSING slave (%p) '%s' refs=%u [%p]",
+	      slave,slave->id().c_str(),slave->refcount(),this);
+    }
     if (m_answered)
 	return;
     if (reason)
